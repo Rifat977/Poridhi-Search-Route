@@ -1,60 +1,82 @@
+import faiss
+import numpy as np
+import pandas as pd
+from sentence_transformers import SentenceTransformer
+
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
-import redis
-import requests
-import json
+
+
+# Load model
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+# ---------- Step 1: Create and Save Embeddings ----------
+def product_embedding(df):
+    # Create embeddings from concatenated product attributes
+    df['embedding'] = df.apply(lambda row: model.encode(
+        f"{row['title']} {row['brand']} {row['description']} {row['final_price']} {row['availability']} {row['categories']} {row['item_weight']} {row['rating']}"
+    ), axis=1)
+
+    # Convert embeddings to 2D array
+    embeddings = np.vstack(df['embedding'].values)
+
+    # Drop embedding column before saving the raw product CSV
+    df.drop(columns=['embedding'], inplace=True)
+    df.to_csv("amazon-products.csv", index=False)
+
+    # Create and save FAISS index
+    vector_store = faiss.IndexFlatL2(embeddings.shape[1])
+    vector_store.add(embeddings)
+    faiss.write_index(vector_store, "amazon-products-embeddings.faiss")
+
+    return embeddings
+
+# ---------- Step 2: Search Similar Products ----------
+def search_similar_products(query, top_k=5):
+    # Encode the query
+    query_embedding = model.encode([query])
+    
+    # Search the FAISS vector store
+    distances, indices = vector_store.search(query_embedding, top_k)
+    
+    # Fetch product details by row indices
+    results = df.iloc[indices[0]].copy()
+    results['similarity_score'] = distances[0]
+    return results
+
+# ---------- Main Flow ----------
+
+# Load product data (previously saved)
+df = pd.read_csv("amazon-products.csv")
+
+# Generate embeddings and FAISS index
+# product_embedding(df)
+
+# Load FAISS index
+vector_store = faiss.read_index("amazon-products-embeddings.faiss")
+
 
 app = FastAPI()
 
-redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
-
 class ProductSearchQuery(BaseModel):
-    query: str
+    query: str  
 
-def search_in_vector_db(query: str, top_k: int = 10):
-    pass
-
-def get_query_embedding(query: str):
-    return [0.1, 0.2, 0.3]  
-
-def get_product_metadata(product_ids):
-    response = requests.post("http://django-app/products/metadata", json={"ids": product_ids})
-    if response.status_code != 200:
-        raise HTTPException(status_code=500, detail="Error fetching product metadata")
-    return response.json()
-
-def get_from_cache(query: str):
-    cached_result = redis_client.get(query)
-    if cached_result:
-        return json.loads(cached_result)
-    return None
-
-def set_to_cache(query: str, result: dict):
-    redis_client.set(query, json.dumps(result), ex=3600)
 
 @app.get("/search/")
 async def product_search(query: str):
-    cached_result = get_from_cache(query)
-    if cached_result:
-        return {"source": "cache", "products": cached_result}
+    results = search_similar_products(query)
 
-    # vector_results = search_in_vector_db(query.query, query.top_k)
+    # Replace NaN values with None (JSON serializable)
+    results = results.replace({np.nan: None})
 
-    # product_ids = [result['id'] for result in vector_results]
-    # product_metadata = get_product_metadata(product_ids)
+    # Convert to dict and cast similarity_score to float
+    results_dict = results.to_dict(orient="records")
+    for r in results_dict:
+        if "similarity_score" in r and isinstance(r["similarity_score"], (np.float32, np.float64)):
+            r["similarity_score"] = float(r["similarity_score"])
 
-    search_result = query
-    # for result in vector_results:
-    #    metadata = next(item for item in product_metadata if item['id'] == result['id'])
-    #   search_result.append({
-    #       "id": result['id'],
-    #       "name": metadata['name'],
-    #       "description": metadata['description'],
-    #       "price": metadata['price'],
-    #       "image_url": metadata['image_url'],
-    #       "score": result['score']  
-#   })
+    return {"results": results_dict}
+    
 
-    # set_to_cache(query.query, search_result)
 
-    return {"source": "vector_db", "products": search_result}
+
