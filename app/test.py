@@ -305,10 +305,10 @@ from deepeval.test_case import LLMTestCase
 
 from deepeval.models import GeminiModel
 
-gemini_model = GeminiModel(
-    model_name="gemini-2.0-flash-001",  
-    api_key="AIzaSyBBrePLC0eqi2LTVio-a7fyFKDqnoB9HdM"  
-)
+# gemini_model = GeminiModel(
+#     model_name="gemini-2.0-flash-001",  
+#     api_key="AIzaSyBBrePLC0eqi2LTVio-a7fyFKDqnoB9HdM"  
+# )
 
 def evaluate_contextual_precision(query, response, reference, context, model, threshold=0.75, include_reason=True):
     """
@@ -329,7 +329,7 @@ def evaluate_contextual_precision(query, response, reference, context, model, th
 
     metric = ContextualPrecisionMetric(
         threshold=threshold,
-        model=gemini_model,
+        model="gemini-1.5-flash",
         include_reason=include_reason
     )
 
@@ -363,7 +363,7 @@ def evaluate_contextual_recall(query, response, reference, context, model, thres
 
     metric = ContextualRecallMetric(
         threshold=threshold,
-        model=gemini_model,
+        model="gemini-1.5-flash",
         include_reason=include_reason
     )
 
@@ -396,7 +396,7 @@ def evaluate_contextual_relevancy(query, response, context, model, threshold=0.7
     """
     metric = ContextualRelevancyMetric(
         threshold=threshold,
-        model=gemini_model,
+        model="gemini-1.5-flash",
         include_reason=include_reason
     )
 
@@ -410,104 +410,89 @@ def evaluate_contextual_relevancy(query, response, context, model, threshold=0.7
 
     return metric.score, metric.reason
 
-# from fastapi import FastAPI, Query
-# import time
-# import re
-# import numpy as np
-# import pandas as pd
-# import asyncio
-
-app = FastAPI()
-
-# Load your evaluation CSV once at app startup
 evaluation_df = pd.read_csv("data/evaluation.csv")
 
-# ------------- Your imports + function definitions above this --------------
-
-@app.get("/evaluate/")
-async def product_search(query: str = Query(..., description="User's product search query")):
+@app.get("/batch-evaluate/")
+async def batch_evaluate():
     start_time = time.time()
-    print(f"\n📥 New search request: {query}")
+    print(f"\n📥 Starting batch evaluation for {len(evaluation_df)} queries...")
 
-    # Step 1: Intent extraction and query cleaning
-    intent = extracts_intent_gemini(query)
-    refined_query = intent.strip().strip('\'"').replace("\\", "")
-    refined_query = re.sub(r'[^\w\s\-\.,%]', '', refined_query)
-    print(f"🧼 Cleaned query: {refined_query}")
+    all_evaluations = []
 
-    # Step 2: Retrieval - Search similar products
-    results_df = search_similar_products(refined_query, top_k=5)
-    results_df = results_df.replace({np.nan: None})
-    results = results_df.to_dict(orient="records")
+    for idx, row in evaluation_df.iterrows():
+        query = row["potential_user_query"]
+        reference = row["combined_fields"]
 
-    # Step 3: Prepare response content for evaluation
-    context = [str(r["page_content"]) for r in results]   # context = top k retrieved
-    response = context[0] if context else ""              # top 1 retrieved result
+        print(f"\n🔍 Evaluating Query [{idx+1}/{len(evaluation_df)}]: {query}")
 
-    # Step 4: Try to find matching reference from evaluation dataset
-    matching_row = evaluation_df[evaluation_df["potential_user_query"] == query]
+        try:
+            # Step 1: Intent extraction and query cleaning
+            intent = extracts_intent_gemini(query)
+            refined_query = intent.strip().strip('\'"').replace("\\", "")
+            refined_query = re.sub(r'[^\w\s\-\.,%]', '', refined_query)
 
-    if not matching_row.empty:
-        reference = matching_row.iloc[0]["combined_fields"]
+            # Step 2: Retrieval
+            results_df = search_similar_products(refined_query, top_k=5)
+            results_df = results_df.replace({np.nan: None})
+            results = results_df.to_dict(orient="records")
 
-        # Step 5: Run Evaluation
-        precision_score, precision_reason = evaluate_contextual_precision(
-            query=query,
-            response=response,
-            reference=reference,
-            context=context,
-            model=gemini_model
-        )
+            # Step 3: Prepare context
+            context = [str(r["page_content"]) for r in results] if results else []
+            response = context[0] if context else ""
 
-        recall_score, recall_reason = evaluate_contextual_recall(
-            query=query,
-            response=response,
-            reference=reference,
-            context=context,
-            model=gemini_model
-        )
+            # Step 4: Run Evaluations
+            precision_score, precision_reason = evaluate_contextual_precision(
+                query=query,
+                response=response,
+                reference=reference,
+                context=context,
+                model=gemini_model
+            )
 
-        relevancy_score, relevancy_reason = evaluate_contextual_relevancy(
-            query=query,
-            response=response,
-            context=context,
-            model=gemini_model
-        )
+            recall_score, recall_reason = evaluate_contextual_recall(
+                query=query,
+                response=response,
+                reference=reference,
+                context=context,
+                model=gemini_model
+            )
 
-        evaluation_results = {
-            "precision_score": precision_score,
-            "precision_reason": precision_reason,
-            "recall_score": recall_score,
-            "recall_reason": recall_reason,
-            "relevancy_score": relevancy_score,
-            "relevancy_reason": relevancy_reason,
-        }
+            relevancy_score, relevancy_reason = evaluate_contextual_relevancy(
+                query=query,
+                response=response,
+                context=context,
+                model=gemini_model
+            )
 
-    else:
-        evaluation_results = {
-            "warning": "No reference found for this query in evaluation dataset. Skipping evaluation."
-        }
+            evaluation_result = {
+                "query": query,
+                "refined_query": refined_query,
+                "precision_score": precision_score,
+                "precision_reason": precision_reason,
+                "recall_score": recall_score,
+                "recall_reason": recall_reason,
+                "relevancy_score": relevancy_score,
+                "relevancy_reason": relevancy_reason,
+                "retrieved_products_count": len(results),
+            }
+
+        except Exception as e:
+            print(f"❌ Error evaluating query: {query}\n{str(e)}")
+            evaluation_result = {
+                "query": query,
+                "error": str(e)
+            }
+
+        all_evaluations.append(evaluation_result)
 
     execution_time = time.time() - start_time
-    print(f"✅ Done in {execution_time:.2f}s with {len(results)} results.\n")
+    print(f"\n✅ Batch evaluation completed in {execution_time:.2f} seconds.\n")
 
-    return { 
+    return {
+        "total_queries": len(evaluation_df),
         "execution_time": f"{execution_time:.2f} seconds",
-        "original_query": query,
-        "refined_query": refined_query,
-        "results": results,
-        "evaluation": evaluation_results
+        "evaluations": all_evaluations
     }
-
-
-
-
-
-
-
-
-
-
 
 
 
